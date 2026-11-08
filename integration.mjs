@@ -47,7 +47,7 @@ try {
       retryPolicy: { mode: 'normal', maxRetries: 2, backoff: { initialDelayMs: 10, maxDelayMs: 100, jitterRatio: 0 } },
     } } } },
     { id: 'agent-default-model', config: { provider: 'quota-test', model: 'test-model' } },
-    { insert: [{ id: 'provider-quota', name: new URL('./index.js', import.meta.url).href,
+    { insert: [{ id: 'provider-quota', name: process.env.DSH_QUOTA_PLUGIN_ENTRY ?? new URL('./dist/index.js', import.meta.url).href,
       config: { stateDirectory: join(home, 'quota'), providers: { 'quota-test': {
         requestsPerMinute: 10, tokensPerMinute: 100_000, tokensPerWeek: 1_000_000,
         minIntervalMs: 10, maxOutputTokens: 256, windowMarginMs: 1, throttleCooldownMs: 20, compactionThresholdTokens: 60000, requestHeadroomTokens: 100,

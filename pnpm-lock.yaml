@@ -7,17 +7,19 @@ settings:
 importers:
 
   .:
-    dependencies:
-      '@deepseek-ai/schemastery':
-        specifier: ^3.19.0
-        version: 3.19.0
-      proper-lockfile:
-        specifier: 4.1.2
-        version: 4.1.2
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: ^4.1.0
         version: 4.1.0
+      '@deepseek-ai/schemastery':
+        specifier: ^3.19.0
+        version: 3.19.0
+      esbuild:
+        specifier: 0.28.2
+        version: 0.28.2
+      proper-lockfile:
+        specifier: 4.1.2
+        version: 4.1.2
       tsx:
         specifier: ^4.23.13
         version: 4.23.15

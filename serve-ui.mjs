@@ -21,7 +21,7 @@ await writeFile(join(home, 'profiles/web/cordis.patch.yml'), JSON.stringify([
   } } } },
   { id: 'ui-settings-general', config: { welcomeNoticeVersion: '2026-09-28.1' } },
   { id: 'agent-default-model', config: { provider: 'sjtu', model: 'quota-test' } },
-  { insert: [{ id: 'provider-quota', name: new URL('./index.js', import.meta.url).href, config: { providers: { sjtu: { maxOutputTokens: 8192 } } } }] },
+  { insert: [{ id: 'provider-quota', name: new URL('./dist/index.js', import.meta.url).href, config: { providers: { sjtu: { maxOutputTokens: 8192 } } } }] },
 ]))
 await writeFile(patch, '[]')
 const child = spawn(process.execPath, ['--import', 'tsx/esm', 'apps/cli/src/bin.ts', '--profile', 'web', '--patch', patch, '--no-open', '--port', '0'], {

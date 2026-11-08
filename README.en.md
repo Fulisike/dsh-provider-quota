@@ -9,10 +9,10 @@ Provider-wide rolling quotas, early context compaction, and a native settings pa
 Upload this repository to GitHub, then install its URL from DSH's plugin manager or run:
 
 ```sh
-dsh plugin --profile web add github:Fulisike/dsh-provider-quota
+dsh plugin --profile web add github:YOUR_NAME/dsh-provider-quota
 ```
 
-The committed JavaScript needs no build step. Restart DSH and refresh the browser after installation. Open Settings → Provider quotas, select a provider already configured in Models, then save the desired limits. No providers are limited until configured. Use the Desktop application's own plugin manager for its reserved profile. From a DSH checkout, substitute `pnpm dsh` for `dsh`.
+The committed ESM bundle includes runtime dependencies and needs no installation build step or nested dependency links. Version 2.0.1 fixes Windows Git installs failing at startup with `EPERM ... stat ... retry` caused by malformed dependency directory links. Restart DSH and refresh the browser after installation. Open Settings → Provider quotas, select a provider already configured in Models, then save the desired limits. No providers are limited until configured. Use the Desktop application's own plugin manager for its reserved profile. From a DSH checkout, substitute `pnpm dsh` for `dsh`.
 
 For a local clone, run `npm install --omit=dev --ignore-scripts`, then `dsh plugin --profile web add .` from its directory. The repository contains no credentials, sessions, or personal accounting data.
 
@@ -34,8 +34,11 @@ Token windows conservatively start at settlement; request windows start at dispa
 
 ```sh
 npm install --ignore-scripts
+npm run build
 npm test
 npm pack --dry-run
 ```
 
-For the optional local-HTTP integration test, set `DSH_SOURCE_ROOT` to a built DSH checkout and run `npm run test:integration`. It exercises the supported headless launcher, a simulated 429 followed by success, durable attempts/retries, accounting, and the wire output cap. It does not contact a real model provider. MIT licensed.
+After changing `index.js` or `config.js`, run `npm run build` and commit `dist/index.js` and `THIRD_PARTY_NOTICES.txt`. Package tests copy the release files into a temporary directory without dependencies, then run the same behavior tests against the exported entry.
+
+For the optional local-HTTP integration test, set `DSH_SOURCE_ROOT` to a built DSH checkout and run `npm run test:integration`. It exercises the supported headless launcher, a simulated 429 followed by success, durable attempts/retries, accounting, and the wire output cap. It does not contact a real model provider. With the same `DSH_SOURCE_ROOT`, `npm run test:git-install` creates a disposable Git repository and DSH home, installs through DSH's pnpm, verifies Web activation and native settings writes, then runs the fake-API integration against the installed entry. MIT licensed.

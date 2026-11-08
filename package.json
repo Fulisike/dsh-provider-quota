@@ -1,19 +1,18 @@
 {
   "name": "dsh-provider-quota",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Provider-wide rolling quotas, early context compaction, and live GUI settings for DeepSeek Harness.",
   "type": "module",
   "license": "MIT",
   "engines": { "node": ">=24.9", "dsh": ">=0.2.2-rc.1 <0.3.0" },
-  "exports": { ".": "./index.js", "./client": "./client.js", "./package.json": "./package.json" },
-  "files": ["index.js", "config.js", "client.js", "cordis.patch.yml", "README.md", "README.en.md", "LICENSE"],
+  "exports": { ".": "./dist/index.js", "./client": "./client.js", "./package.json": "./package.json" },
+  "files": ["dist/index.js","THIRD_PARTY_NOTICES.txt","client.js","cordis.patch.yml","README.md","README.en.md","LICENSE"],
   "dsh": {
     "bundle": { "patch": "./cordis.patch.yml" },
     "client": { "platform": "web", "immediately": true, "inject": [
       "@deepseek-ai/dsh-client-locale", "@deepseek-ai/dsh-client-ui-settings", "@deepseek-ai/dsh-client-connection", "@deepseek-ai/dsh-client-ui-primitives"
     ] }
   },
-  "dependencies": { "proper-lockfile": "4.1.2", "@deepseek-ai/schemastery": "^3.19.0" },
-  "scripts": { "test": "node --test test.mjs", "test:integration": "node --import tsx/esm integration.mjs" },
-  "devDependencies": { "@deepseek-ai/cordis": "^4.1.0", "tsx": "^4.23.13" }
+  "scripts": {"build":"node build.mjs","test":"node --test test.mjs package.test.mjs","test:package":"node --test package.test.mjs","test:integration":"node --import tsx/esm integration.mjs","test:git-install":"node git-install.mjs"},
+  "devDependencies": {"@deepseek-ai/cordis":"^4.1.0","tsx":"^4.23.13","proper-lockfile":"4.1.2","@deepseek-ai/schemastery":"^3.19.0","esbuild":"0.28.2"}
 }

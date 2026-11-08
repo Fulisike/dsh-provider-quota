@@ -6,13 +6,13 @@ DeepSeek Harness 的提供方共享限流插件，带原生 GUI 设置入口。�
 
 ## 安装
 
-需要 Node.js 24.9+ 和兼容的 DSH 0.2.2。将本仓库上传 GitHub 后，在 DSH 的“插件 → 添加插件”输入仓库 URL，或用 DSH 的命令安装：
+需要 Node.js 24.9+ 和兼容的 DSH 0.2.2。将本仓库上传 GitHub 后，在 DSH 的“插件 → 添加插件”输入仓库 URL，或用 DSH 的命令安装（把 `YOUR_NAME` 换成你的 GitHub 用户名）：
 
 ```sh
-dsh plugin --profile web add github:Fulisike/dsh-provider-quota
+dsh plugin --profile web add github:YOUR_NAME/dsh-provider-quota
 ```
 
-插件代码已经是可运行的 JavaScript，无需构建。安装后重启 DSH 并刷新页面，在“设置 → 提供方限流”选择已经配置的提供方，调整参数并点击“保存并应用”。新安装默认不限制任何提供方；第一次保存会启用所选提供方的共享额度。界面支持中英文，字段变更走 DSH 原生配置表单，保留密钥和其他提供方设置。
+仓库提交了包含运行依赖的 ESM 产物，安装时无需构建，也不依赖嵌套的 `node_modules` 链接。2.0.1 修复了 Windows 下 Git 安装后因依赖目录链接异常而出现的 `EPERM ... stat ... retry` 启动失败。安装后重启 DSH 并刷新页面，在“设置 → 提供方限流”选择已经配置的提供方，调整参数并点击“保存并应用”。新安装默认不限制任何提供方；第一次保存会启用所选提供方的共享额度。界面支持中英文，字段变更走 DSH 原生配置表单，保留密钥和其他提供方设置。
 
 从源码安装也可以：
 
@@ -65,10 +65,15 @@ dsh plugin --profile web add .
 
 ```sh
 npm install --ignore-scripts
+npm run build
 npm test
 npm pack --dry-run
 ```
 
+修改 `index.js` 或 `config.js` 后，运行 `npm run build` 并提交 `dist/index.js` 和 `THIRD_PARTY_NOTICES.txt`。包测试把发布文件复制到没有依赖的临时目录，再运行同一组行为测试，验证实际导出入口不需要 `node_modules`。
+
 端到端测试需要本地 DSH 源码及已经构建的产物；通过 `DSH_SOURCE_ROOT` 指定仓库目录，再运行 `npm run test:integration`。测试只请求本机模拟 HTTP 服务，验证 429 恢复、失败尝试、日志与实际输出上限，不调用真实 API。GUI 通过 DSH 的 slots、locale、configForms 和认证 connection 注册，不增加独立应用入口。
+
+同样设置 `DSH_SOURCE_ROOT` 后，`npm run test:git-install` 会建立一次性 Git 仓库和全新 DSH home，通过 DSH 自带的 pnpm 执行 Git 安装，验证 Web 激活、原生设置保存，再对安装后的入口运行模拟 429 恢复测试。
 
 许可证：MIT。

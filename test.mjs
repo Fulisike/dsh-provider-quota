@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { admission, apply, Config, usageTokens } from './index.js'
+const { admission, apply, Config, usageTokens } = await import(process.env.DSH_QUOTA_TEST_ENTRY ?? './index.js')
 import { defaults, parseConfig } from './config.js'
 
 const { Context } = await import(process.env.DSH_TEST_CORDIS ?? '@deepseek-ai/cordis')
