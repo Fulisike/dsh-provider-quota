@@ -2501,10 +2501,12 @@ var defaults = Object.freeze({
   windowMarginMs: 250,
   lockPollMs: 500,
   throttleCooldownMs: 6e4,
-  compactionThresholdTokens: 18e4,
+  autoCompact: true,
+  compactionThresholdTokens: -1,
   requestHeadroomTokens: 4096
 });
 var positive = (value) => Number.isSafeInteger(value) && value > 0;
+var unlimitedFields = /* @__PURE__ */ new Set(["requestsPerMinute", "tokensPerMinute", "tokensPerWeek", "minIntervalMs", "compactionThresholdTokens"]);
 function parseConfig(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("provider-quota: expected config object");
   for (const key of Object.keys(raw)) if (!["stateDirectory", "providers"].includes(key)) throw new Error(`provider-quota: unknown config field ${key}`);
@@ -2518,9 +2520,10 @@ function parseConfig(raw) {
     for (const key of Object.keys(source)) if (!Object.hasOwn(defaults, key)) throw new Error(`provider-quota: unknown field ${provider}.${key}`);
     const policy = { ...defaults, ...source };
     for (const [key, value] of Object.entries(policy)) {
-      if (!(key === "tokenSafetyFactor" ? Number.isFinite(value) && value >= 1 : positive(value))) throw new Error(`provider-quota: invalid ${provider}.${key}`);
+      const valid = key === "autoCompact" ? typeof value === "boolean" : key === "tokenSafetyFactor" ? Number.isFinite(value) && value >= 1 : positive(value) || value === -1 && unlimitedFields.has(key);
+      if (!valid) throw new Error(`provider-quota: invalid ${provider}.${key}`);
     }
-    if (policy.maxOutputTokens + policy.requestHeadroomTokens >= policy.tokensPerMinute || policy.tokensPerMinute > policy.tokensPerWeek || policy.compactionThresholdTokens + policy.maxOutputTokens + policy.requestHeadroomTokens >= policy.tokensPerMinute) {
+    if (policy.tokensPerWeek !== -1 && policy.maxOutputTokens >= policy.tokensPerWeek || policy.tokensPerMinute !== -1 && (policy.maxOutputTokens + policy.requestHeadroomTokens >= policy.tokensPerMinute || policy.tokensPerWeek !== -1 && policy.tokensPerMinute > policy.tokensPerWeek || policy.compactionThresholdTokens !== -1 && policy.compactionThresholdTokens + policy.maxOutputTokens + policy.requestHeadroomTokens >= policy.tokensPerMinute)) {
       throw new Error(`provider-quota: ${provider} requires compaction threshold + output + headroom < TPM <= weekly tokens`);
     }
     providers[provider] = policy;
@@ -2529,7 +2532,7 @@ function parseConfig(raw) {
 }
 var policySchema = Schema.object(Object.fromEntries(Object.entries(defaults).map(([key, value]) => [
   key,
-  (key === "tokenSafetyFactor" ? Schema.number().min(1) : Schema.number().step(1).min(1)).default(value)
+  (key === "autoCompact" ? Schema.boolean() : key === "tokenSafetyFactor" ? Schema.number().min(1) : Schema.number().step(1).min(unlimitedFields.has(key) ? -1 : 1)).default(value)
 ])));
 var Config = Schema.object({
   stateDirectory: Schema.string(),
@@ -2557,18 +2560,19 @@ function usageTokens(usage) {
   return Math.ceil(usage.inputTokens + usage.outputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0));
 }
 function admission(state, policy, cost, now) {
-  if (cost > policy.tokensPerMinute - (policy.requestHeadroomTokens ?? 0)) return { kind: "oversized" };
+  if (policy.tokensPerMinute !== -1 && cost > policy.tokensPerMinute - (policy.requestHeadroomTokens ?? 0)) return { kind: "oversized", period: "minute", limit: policy.tokensPerMinute };
+  if (policy.tokensPerWeek !== -1 && cost > policy.tokensPerWeek) return { kind: "oversized", period: "week", limit: policy.tokensPerWeek };
   const week = state.records.filter((row) => row.chargedAt + WEEK + policy.windowMarginMs > now);
-  if (week.reduce((sum, row) => sum + row.tokens, 0) + cost > policy.tokensPerWeek) {
+  if (policy.tokensPerWeek !== -1 && week.reduce((sum, row) => sum + row.tokens, 0) + cost > policy.tokensPerWeek) {
     return { kind: "weekly", retryAt: Math.min(...week.map((row) => row.chargedAt + WEEK + policy.windowMarginMs)) };
   }
-  let at = Math.max(now, state.cooldownUntil, state.lastSentAt + policy.minIntervalMs);
+  let at = Math.max(now, state.cooldownUntil, state.lastSentAt + (policy.minIntervalMs === -1 ? 0 : policy.minIntervalMs));
   const requests = state.records.filter((row) => row.sentAt + MINUTE + policy.windowMarginMs > now);
-  while (requests.filter((row) => row.sentAt + MINUTE + policy.windowMarginMs > at).length >= policy.requestsPerMinute) {
+  while (policy.requestsPerMinute !== -1 && requests.filter((row) => row.sentAt + MINUTE + policy.windowMarginMs > at).length >= policy.requestsPerMinute) {
     at = Math.min(...requests.filter((row) => row.sentAt + MINUTE + policy.windowMarginMs > at).map((row) => row.sentAt + MINUTE + policy.windowMarginMs));
   }
   const tokens = state.records.filter((row) => row.chargedAt + MINUTE + policy.windowMarginMs > now);
-  while (tokens.filter((row) => row.chargedAt + MINUTE + policy.windowMarginMs > at).reduce((sum, row) => sum + row.tokens, 0) + cost > policy.tokensPerMinute) {
+  while (policy.tokensPerMinute !== -1 && tokens.filter((row) => row.chargedAt + MINUTE + policy.windowMarginMs > at).reduce((sum, row) => sum + row.tokens, 0) + cost > policy.tokensPerMinute) {
     at = Math.min(...tokens.filter((row) => row.chargedAt + MINUTE + policy.windowMarginMs > at).map((row) => row.chargedAt + MINUTE + policy.windowMarginMs));
   }
   return { kind: "ready", delayMs: at - now };
@@ -2673,7 +2677,8 @@ async function apply(ctx, raw, internals = {}) {
         const now2 = clock();
         const decision = admission(state, policy, cost, now2);
         if (decision.kind === "oversized") {
-          yield finish("LOCAL_REQUEST_TOO_LARGE", `\u63D0\u4F9B\u65B9 ${options.provider}\uFF1A\u9884\u8BA1\u8F93\u5165\u4E0E\u8F93\u51FA\u9884\u7559\u5171 ${cost} token\uFF0C\u52A0\u4E0A ${policy.requestHeadroomTokens} token \u5B89\u5168\u4F59\u91CF\u540E\u8D85\u8FC7\u6BCF\u5206\u949F ${policy.tokensPerMinute}\uFF1B\u8BF7\u538B\u7F29\u4E0A\u4E0B\u6587\u6216\u964D\u4F4E\u6700\u5927\u8F93\u51FA\u3002`);
+          const budget = decision.period === "minute" ? `\u6BCF\u5206\u949F ${decision.limit}\uFF08\u542B ${policy.requestHeadroomTokens} token \u989D\u5916\u4F59\u91CF\uFF09` : `\u6EDA\u52A8 7 \u5929 ${decision.limit}`;
+          yield finish("LOCAL_REQUEST_TOO_LARGE", `\u63D0\u4F9B\u65B9 ${options.provider}\uFF1A\u9884\u8BA1\u8F93\u5165\u4E0E\u8F93\u51FA\u9884\u7559\u5171 ${cost} token\uFF0C\u8D85\u8FC7${budget}\u9884\u7B97\uFF1B\u8BF7\u538B\u7F29\u4E0A\u4E0B\u6587\u6216\u964D\u4F4E\u6700\u5927\u8F93\u51FA\u3002`);
           return;
         }
         if (decision.kind === "weekly") {
@@ -2731,14 +2736,15 @@ async function apply(ctx, raw, internals = {}) {
       }
     }
   }
+  const compactionFor = (agent) => agent.ctx.get("agentPresets")?.serviceFor(agent, "compaction") ?? agent.ctx.get("compaction");
   const offPreStep = ctx.on("agent/pre-step", ({ agent, modelSelection, signal }, next) => track((async () => {
     lifetime.signal.throwIfAborted();
     const policy = readConfig().providers[modelSelection.provider];
-    if (policy) {
-      const engine = agent.ctx.get("compaction");
-      if (!engine) throw new Error("provider-quota: the configured provider requires a compaction service");
+    if (policy?.autoCompact && policy.compactionThresholdTokens !== -1) {
       const pressure = ctx.tokenMeter.measure(agent.session).totalTokens;
       if (pressure >= policy.compactionThresholdTokens) {
+        const engine = compactionFor(agent);
+        if (!engine) throw new Error("provider-quota: automatic compaction is unavailable; enable the preset compaction backend or disable automatic compaction");
         signal.throwIfAborted();
         const result = await engine.compactIfNeeded(agent, "context-overflow", AbortSignal.any([signal, lifetime.signal]));
         if (result === null) ctx.logger.warn("provider-quota: no balanced history range can be compacted for %s", modelSelection.provider);
@@ -2748,12 +2754,15 @@ async function apply(ctx, raw, internals = {}) {
   })()), { global: true });
   const offRecovery = ctx.on("agent/request-error", (payload, next) => track((async () => {
     const { agent, failure, provider, turn, step, signal } = payload;
-    if (failure.code !== "LOCAL_REQUEST_TOO_LARGE" || !readConfig().providers[provider]) return next();
+    if (failure.code !== "LOCAL_REQUEST_TOO_LARGE" || !readConfig().providers[provider]?.autoCompact) return next();
     const key = `${turn}/${step}`;
     if (recovered.get(agent) === key) return next();
     recovered.set(agent, key);
-    const engine = agent.ctx.get("compaction");
-    if (!engine) return next();
+    const engine = compactionFor(agent);
+    if (!engine) {
+      ctx.logger.warn("provider-quota: automatic compaction is unavailable in this agent preset; the oversized request remains blocked");
+      return next();
+    }
     const fused = AbortSignal.any([signal, lifetime.signal]);
     fused.throwIfAborted();
     const result = await engine.compactIfNeeded(agent, "context-overflow", fused);

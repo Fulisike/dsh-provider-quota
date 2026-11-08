@@ -6,55 +6,66 @@ window.__ModuleLoader__.load({ id: 'dsh-provider-quota', factory(require) {
   const NS = 'provider.quota'
   const zh = {
     title: '提供方限流', intro: '同一提供方的所有模型共享滚动额度。输入与输出合计计入 token 限额。',
-    provider: '提供方', limits: '共享额度与上下文', recovery: '连接与临时故障恢复',
+    provider: '提供方', limits: '共享额度', recovery: '等待与重试', advanced: '高级设置',
     requestsPerMinute: '每分钟请求上限', tokensPerMinute: '每分钟 token 上限（输入＋输出）', tokensPerWeek: '滚动 7 天 token 上限',
     minIntervalMs: '最短发送间隔（毫秒）', maxOutputTokens: '单次最大输出 token', tokenSafetyFactor: '输入估计安全系数',
-    compactionThresholdTokens: '提前压缩阈值（token）', requestHeadroomTokens: '单次请求额外余量（token）',
+    compactionThresholdTokens: '固定提前压缩阈值（token）', requestHeadroomTokens: '单次请求额外余量（token）',
     windowMarginMs: '窗口边缘余量（毫秒）', lockPollMs: '队列检查间隔（毫秒）', throttleCooldownMs: '429 最短冷却（毫秒）',
-    streamIdleTimeoutMs: '流无活动超时（毫秒）', timeoutMs: 'SDK 请求超时（毫秒）', maxRetries: '最多重试次数',
-    initialDelayMs: '首次退避（毫秒）', maxDelayMs: '最长退避（毫秒）', jitterRatio: '退避抖动比例（0–1）',
+    streamIdleTimeoutMs: '连续多久没有输出才重试（秒）', timeoutMs: '单次请求最长等待（秒）', maxRetries: '失败后最多重试次数',
+    initialDelayMs: '首次重试前等待（秒）', maxDelayMs: '重试等待最长间隔（秒）', jitterRatio: '退避抖动比例（0–1）',
+    autoCompact: '请求过大时自动压缩历史', autoNote: '默认在完整输入、最大输出和余量放不进单次额度时压缩；仅滚动窗口余额不足时排队等待。高级设置可额外启用固定阈值。关闭后仍保留 DSH 原生自动压缩和 /compact。',
+    unlimited: '填 -1 表示不限制', intervalNote: '填 -1 表示不额外设置发送间隔', thresholdNote: '填 -1 表示只按请求预算压缩；正数会额外按上下文阈值提前压缩',
+    advancedNote: '保留原有细粒度参数。秒数字段最多支持 3 位小数，对应毫秒精度。', scale: '当前校准后的输入估计系数',
     save: '保存并应用', saving: '保存中…', discard: '放弃修改', refresh: '刷新用量', loading: '正在读取设置…',
     saved: '已保存；新请求使用新设置，在途请求保留启动时的设置。', refused: '设置未保存，可能存在并发修改；请刷新后重试。',
     partial: '限流已保存，连接设置未保存。请刷新后检查并重试。', failed: '读取或保存失败，请检查连接后重试。',
-    invalid: '请填写有效数字；压缩阈值＋最大输出＋额外余量必须小于 TPM，TPM 不得大于周额度。',
+    invalid: '请检查数字。额度须为正整数或 -1；最大输出和余量必须能放进已启用的分钟额度，固定压缩阈值也须留出这部分空间。',
     unavailable: '当前 profile 未提供可编辑的限流和模型设置。', noProvider: '请先在模型设置中添加提供方。',
     status: '本地用量（包含在途预留）', requests: '分钟请求', minute: '分钟 token', week: '7 天 token', cooldown: '冷却剩余秒数',
-    note: '输入 token 是估计值，会根据实际用量校准。其他程序的消耗无法统计。接近阈值时自动压缩历史，超大单条输入仍需拆分。',
-    recoveryNote: '仅重试限流、服务端、超时、网络和空响应错误。摘要输出默认上限为 8192 token。',
+    note: '输入与输出合计计费。输入估计会根据实际用量校准；其他程序和机器的消耗无法统计。最大输出须为正数，用于发送前预留预算。',
+    recoveryNote: '仅重试限流、服务端、超时、网络和空响应错误。0 次表示关闭失败重试。',
     readOnly: '当前设置只读。', enable: '启用该提供方的共享额度', disable: '停用该提供方的共享额度',
   }
   const en = {
     title: 'Provider quotas', intro: 'All models of a provider share rolling quotas. Token limits include input and output.',
-    provider: 'Provider', limits: 'Shared quotas and context', recovery: 'Connection and transient recovery',
+    provider: 'Provider', limits: 'Shared quotas', recovery: 'Waiting and retries', advanced: 'Advanced settings',
     requestsPerMinute: 'Requests per minute', tokensPerMinute: 'Tokens per minute (input + output)', tokensPerWeek: 'Tokens per rolling 7 days',
     minIntervalMs: 'Minimum send interval (ms)', maxOutputTokens: 'Maximum output tokens', tokenSafetyFactor: 'Input estimate safety factor',
-    compactionThresholdTokens: 'Early compaction threshold (tokens)', requestHeadroomTokens: 'Extra request headroom (tokens)',
+    compactionThresholdTokens: 'Fixed early compaction threshold (tokens)', requestHeadroomTokens: 'Extra request headroom (tokens)',
     windowMarginMs: 'Window margin (ms)', lockPollMs: 'Queue check interval (ms)', throttleCooldownMs: 'Minimum 429 cooldown (ms)',
-    streamIdleTimeoutMs: 'Stream idle timeout (ms)', timeoutMs: 'SDK request timeout (ms)', maxRetries: 'Maximum retries',
-    initialDelayMs: 'Initial backoff (ms)', maxDelayMs: 'Maximum backoff (ms)', jitterRatio: 'Backoff jitter ratio (0–1)',
+    streamIdleTimeoutMs: 'Retry after no output for (seconds)', timeoutMs: 'Maximum request wait (seconds)', maxRetries: 'Maximum retries after failure',
+    initialDelayMs: 'Initial retry wait (seconds)', maxDelayMs: 'Maximum retry wait (seconds)', jitterRatio: 'Backoff jitter ratio (0–1)',
+    autoCompact: 'Compact history when a request is too large', autoNote: 'By default, compact when full input, maximum output, and headroom cannot fit one request; wait when only the rolling window is full. Advanced settings can add a fixed threshold. DSH native compaction and /compact remain available when this is off.',
+    unlimited: 'Use -1 for no limit', intervalNote: 'Use -1 for no extra send interval', thresholdNote: 'Use -1 for request-budget compaction only; a positive threshold also compacts early by context size',
+    advancedNote: 'Original controls remain available. Seconds support 3 decimal places for millisecond precision.', scale: 'Current calibrated input estimate factor',
     save: 'Save and apply', saving: 'Saving…', discard: 'Discard changes', refresh: 'Refresh usage', loading: 'Loading settings…',
     saved: 'Saved. New requests use these settings; active requests retain their captured settings.', refused: 'Changes were refused, possibly due to a concurrent edit. Refresh and retry.',
     partial: 'Quotas saved; connection settings were not saved. Refresh, check the values, and retry.', failed: 'Could not read or save settings. Check the connection and retry.',
-    invalid: 'Enter valid numbers. Compaction threshold + output + headroom must be below TPM, and TPM cannot exceed the weekly quota.',
+    invalid: 'Check the numbers. Quotas must be positive integers or -1. Output and headroom must fit an enabled minute quota; a fixed compaction threshold must leave that space too.',
     unavailable: 'This profile does not provide editable quota and model settings.', noProvider: 'Add a provider in model settings first.',
     status: 'Local usage (includes active reservations)', requests: 'Minute requests', minute: 'Minute tokens', week: '7-day tokens', cooldown: 'Cooldown seconds',
-    note: 'Input tokens are estimated and calibrated from actual usage. Other applications are not counted. Large histories compact early; split a single oversized input.',
-    recoveryNote: 'Retries cover rate limits, server errors, timeouts, transport errors, and empty responses. Summary output defaults to 8192 tokens.',
+    note: 'Limits count input and output. Input estimates calibrate from actual usage; other applications and machines are not counted. Maximum output must be positive for pre-dispatch reservation.',
+    recoveryNote: 'Retries cover rate limits, server errors, timeouts, transport errors, and empty responses. Set retries to 0 to disable failure recovery.',
     readOnly: 'These settings are read-only.', enable: 'Enable shared quotas for this provider', disable: 'Disable shared quotas for this provider',
   }
   const CSS = `
 .dsh-pq{display:flex;flex-direction:column;gap:24px;max-width:760px;width:100%;color:var(--dsw-alias-label-primary);font-size:14px;line-height:1.5}
-.dsh-pq h2,.dsh-pq h3,.dsh-pq p{margin:0}.dsh-pq h2{font-size:20px;line-height:28px}.dsh-pq h3{font-size:16px;line-height:24px}
+.dsh-pq h2,.dsh-pq h3,.dsh-pq p{margin:0}.dsh-pq h2{font-size:20px;line-height:28px;font-weight:500}.dsh-pq h3{font-size:16px;line-height:24px;font-weight:500}
 .dsh-pq .pq-intro,.dsh-pq .pq-note{color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px}
 .dsh-pq .pq-group{display:flex;flex-direction:column;gap:16px;border-top:1px solid var(--dsw-alias-border-l2);padding-top:20px}
 .dsh-pq .pq-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px 24px}.dsh-pq label{display:flex;flex-direction:column;gap:7px;min-width:0}
 .dsh-pq input,.dsh-pq select{width:100%;box-sizing:border-box}.dsh-pq select{padding:8px 12px;border:1px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-1);color:inherit;font:inherit}
 .dsh-pq .pq-actions{display:flex;gap:12px;flex-wrap:wrap;align-items:center}.dsh-pq .pq-stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;font-variant-numeric:tabular-nums}.dsh-pq .pq-stats div{padding:10px 12px;background:var(--dsw-alias-bg-layer-3);border-radius:var(--dsw-radius-md)}
 .dsh-pq .pq-stats span{display:block;font-size:12px;color:var(--dsw-alias-label-tertiary)}.dsh-pq [role=alert]{font-weight:500}.dsh-pq button{white-space:normal}
+.dsh-pq .pq-toggle{flex-direction:row;align-items:center;gap:10px}.dsh-pq .pq-toggle input{width:auto;flex-shrink:0}.dsh-pq .pq-toggle span{min-width:0}
+.dsh-pq summary{cursor:pointer;font-weight:500;padding:2px 0}.dsh-pq details[open] summary{margin-bottom:16px}.dsh-pq .pq-help{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}.dsh-pq .pq-advanced{display:flex;flex-direction:column;gap:16px}
 @media(max-width:720px){.dsh-pq .pq-grid{grid-template-columns:1fr}.dsh-pq{gap:20px}}`
   const quotaFields = ['requestsPerMinute', 'tokensPerMinute', 'tokensPerWeek', 'minIntervalMs', 'maxOutputTokens',
     'compactionThresholdTokens', 'requestHeadroomTokens', 'tokenSafetyFactor', 'windowMarginMs', 'lockPollMs', 'throttleCooldownMs']
   const retryFields = ['streamIdleTimeoutMs', 'timeoutMs', 'maxRetries', 'initialDelayMs', 'maxDelayMs', 'jitterRatio']
+  const basicQuotaFields = ['requestsPerMinute', 'tokensPerMinute', 'tokensPerWeek', 'maxOutputTokens']
+  const unlimitedFields = new Set(['requestsPerMinute', 'tokensPerMinute', 'tokensPerWeek', 'minIntervalMs', 'compactionThresholdTokens'])
+  const secondsFields = new Set(['streamIdleTimeoutMs', 'timeoutMs', 'initialDelayMs', 'maxDelayMs'])
   const retryDefaults = { streamIdleTimeoutMs: 900000, timeoutMs: 1800000, maxRetries: 12, initialDelayMs: 10000, maxDelayMs: 300000, jitterRatio: 0.2 }
   function useForm(form) {
     const subscribe = React.useCallback(listener => form.subscribe(listener), [form])
@@ -93,7 +104,7 @@ window.__ModuleLoader__.load({ id: 'dsh-provider-quota', factory(require) {
       const p = adapter.value.providers[provider]
       const policy = p.retryPolicy ?? {}
       const r = { ...retryDefaults, ...p, ...policy, ...policy.backoff }
-      setDraft(Object.fromEntries([...quotaFields.map(key => [key, String(q[key])]), ...retryFields.map(key => [key, String(r[key])])]))
+      setDraft({ ...Object.fromEntries([...quotaFields.map(key => [key, String(q[key])]), ...retryFields.map(key => [key, String(r[key])])]), autoCompact: q.autoCompact })
       setRevision({ quota: quota.revision, adapter: adapter.revision })
       setDirty(false)
     }, [provider, status, quota, adapter])
@@ -102,16 +113,19 @@ window.__ModuleLoader__.load({ id: 'dsh-provider-quota', factory(require) {
     const enabled = Boolean(quota.value?.providers?.[provider])
     const writable = quota.writable && adapter.writable
     async function save() {
-      const numbers = Object.fromEntries(Object.entries(draft).map(([key, value]) => [key, value.trim() === '' ? NaN : Number(value)]))
+      const numbers = Object.fromEntries([...quotaFields, ...retryFields].map(key => [key, draft[key].trim() === '' ? NaN : Number(draft[key])]))
       const valid = Object.entries(numbers).every(([key, value]) => ['tokenSafetyFactor', 'jitterRatio'].includes(key)
         ? Number.isFinite(value) && (key === 'tokenSafetyFactor' ? value >= 1 : value >= 0 && value <= 1)
-        : Number.isSafeInteger(value) && (key === 'maxRetries' ? value >= 0 : value > 0))
-      if (!valid || numbers.compactionThresholdTokens + numbers.maxOutputTokens + numbers.requestHeadroomTokens >= numbers.tokensPerMinute
-        || numbers.tokensPerMinute > numbers.tokensPerWeek || numbers.initialDelayMs > numbers.maxDelayMs) { setMessage('invalid'); return }
+        : Number.isSafeInteger(value) && (key === 'maxRetries' ? value >= 0 : value > 0 || value === -1 && unlimitedFields.has(key)))
+      const budgetInvalid = numbers.tokensPerMinute !== -1 && (numbers.maxOutputTokens + numbers.requestHeadroomTokens >= numbers.tokensPerMinute
+        || numbers.compactionThresholdTokens !== -1 && numbers.compactionThresholdTokens + numbers.maxOutputTokens + numbers.requestHeadroomTokens >= numbers.tokensPerMinute
+        || numbers.tokensPerWeek !== -1 && numbers.tokensPerMinute > numbers.tokensPerWeek)
+      if (!valid || budgetInvalid || numbers.tokensPerWeek !== -1 && numbers.maxOutputTokens >= numbers.tokensPerWeek
+        || numbers.initialDelayMs > numbers.maxDelayMs) { setMessage('invalid'); return }
       setSaving(true); setMessage('')
       let quotasSaved = false
       try {
-        const q = Object.fromEntries(quotaFields.map(key => [key, numbers[key]]))
+        const q = { ...Object.fromEntries(quotaFields.map(key => [key, numbers[key]])), autoCompact: draft.autoCompact }
         if (!await quotaForm.mutate([{ op: 'set', path: ['providers', provider], value: q }], revision.quota)) { setMessage('refused'); return }
         quotasSaved = true
         const oldPolicy = adapter.value.providers[provider].retryPolicy
@@ -136,10 +150,19 @@ window.__ModuleLoader__.load({ id: 'dsh-provider-quota', factory(require) {
     if (quota.status === 'unavailable' || adapter.status === 'unavailable') return h('p', null, t('unavailable'))
     if (quota.status !== 'ready' || adapter.status !== 'ready') return h('p', { role: 'status' }, t('loading'))
     const usage = status?.providers.find(row => row.provider === provider)
-    const field = key => h('label', { key }, h('span', null, t(key)), h(Input, {
-      type: 'number', value: draft?.[key] ?? '', step: ['tokenSafetyFactor', 'jitterRatio'].includes(key) ? '0.05' : '1',
-      disabled: !writable || saving || !draft, onChange: event => { setDraft({ ...draft, [key]: event.target.value }); setDirty(true) },
-    }))
+    const field = key => {
+      const unit = secondsFields.has(key) ? 1000 : 1
+      const value = draft?.[key]
+      const hint = key === 'compactionThresholdTokens' ? 'thresholdNote' : key === 'minIntervalMs' ? 'intervalNote' : unlimitedFields.has(key) ? 'unlimited' : null
+      return h('label', { key }, h('span', null, t(key)), h(Input, {
+        type: 'number', value: value === undefined || value === '' ? '' : String(Number(value) / unit),
+        step: unit === 1000 ? '0.001' : ['tokenSafetyFactor', 'jitterRatio'].includes(key) ? '0.05' : '1',
+        disabled: !writable || saving || !draft, onChange: event => {
+          const value = event.target.value
+          setDraft({ ...draft, [key]: value === '' ? '' : unit === 1 ? value : String(Math.round(Number(value) * unit)) }); setDirty(true)
+        },
+      }), hint ? h('span', { className: 'pq-help' }, t(hint)) : null)
+    }
     return h('div', { className: 'dsh-pq' },
       h('div', null, h('h2', null, t('title')), h('p', { className: 'pq-intro' }, t('intro'))),
       h('label', null, t('provider'), h('select', { value: provider, disabled: saving || dirty, onChange: event => setProvider(event.target.value) },
@@ -150,8 +173,14 @@ window.__ModuleLoader__.load({ id: 'dsh-provider-quota', factory(require) {
         statusError ? h('p', { role: 'alert' }, t('failed')) : null,
         h('div', { className: 'pq-stats' }, [['requests', usage?.requests], ['minute', usage?.minuteTokens], ['week', usage?.weekTokens],
           ['cooldown', usage ? Math.ceil(usage.cooldownMs / 1000) : 0]].map(([key, value]) => h('div', { key }, h('span', null, t(key)), value?.toLocaleString() ?? '—')))),
-      h('section', { className: 'pq-group' }, h('h3', null, t('limits')), h('div', { className: 'pq-grid' }, quotaFields.map(field)), h('p', { className: 'pq-note' }, t('note'))),
-      h('section', { className: 'pq-group' }, h('h3', null, t('recovery')), h('div', { className: 'pq-grid' }, retryFields.map(field)), h('p', { className: 'pq-note' }, t('recoveryNote'))),
+      h('section', { className: 'pq-group' }, h('h3', null, t('limits')), h('div', { className: 'pq-grid' }, basicQuotaFields.map(field)), h('p', { className: 'pq-note' }, t('note')),
+        h('label', { className: 'pq-toggle' }, h('input', { type: 'checkbox', checked: draft?.autoCompact ?? true, disabled: !writable || saving || !draft,
+          onChange: event => { setDraft({ ...draft, autoCompact: event.target.checked }); setDirty(true) } }), h('span', null, t('autoCompact'))), h('p', { className: 'pq-note' }, t('autoNote'))),
+      h('section', { className: 'pq-group' }, h('h3', null, t('recovery')), h('div', { className: 'pq-grid' }, ['streamIdleTimeoutMs', 'maxRetries'].map(field)), h('p', { className: 'pq-note' }, t('recoveryNote'))),
+      h('details', { className: 'pq-group' }, h('summary', null, t('advanced')), h('div', { className: 'pq-advanced' },
+        h('p', { className: 'pq-note' }, t('advancedNote')),
+        h('div', { className: 'pq-grid' }, [...quotaFields.filter(key => !basicQuotaFields.includes(key)), ...retryFields.filter(key => !['streamIdleTimeoutMs', 'maxRetries'].includes(key))].map(field)),
+        usage ? h('p', { className: 'pq-note' }, t('scale') + ': ' + Math.max(usage.inputScale, Number(draft?.tokenSafetyFactor) || 1).toFixed(3)) : null)),
       h('div', { className: 'pq-actions' },
         h(Button, { variant: 'primary', disabled: !writable || saving || !draft, onClick: save }, t(saving ? 'saving' : 'save')),
         h(Button, { variant: 'outline', disabled: saving, onClick: () => { loadDraft(); setMessage('') } }, t('discard')),

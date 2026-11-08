@@ -6,13 +6,13 @@ Provider-wide rolling quotas, early context compaction, and a native settings pa
 
 ## Install
 
-Upload this repository to GitHub, then install its URL from DSH's plugin manager or run:
+Install the repository URL from DSH's plugin manager or run:
 
 ```sh
-dsh plugin --profile web add github:YOUR_NAME/dsh-provider-quota
+dsh plugin --profile web add github:Fulisike/dsh-provider-quota#main
 ```
 
-The committed ESM bundle includes runtime dependencies and needs no installation build step or nested dependency links. Version 2.0.1 fixes Windows Git installs failing at startup with `EPERM ... stat ... retry` caused by malformed dependency directory links. Restart DSH and refresh the browser after installation. Open Settings → Provider quotas, select a provider already configured in Models, then save the desired limits. No providers are limited until configured. Use the Desktop application's own plugin manager for its reserved profile. From a DSH checkout, substitute `pnpm dsh` for `dsh`.
+The committed ESM bundle includes runtime dependencies and needs no installation build step or nested dependency links. Restart DSH and refresh the browser after installation. Open Settings → Provider quotas, select a provider already configured in Models, then save the desired limits. No providers are limited until configured. Use the Desktop application's own plugin manager for its reserved profile. From a DSH checkout, substitute `pnpm dsh` for `dsh`.
 
 For a local clone, run `npm install --omit=dev --ignore-scripts`, then `dsh plugin --profile web add .` from its directory. The repository contains no credentials, sessions, or personal accounting data.
 
@@ -20,9 +20,17 @@ For a local clone, run `npm install --omit=dev --ignore-scripts`, then `dsh plug
 
 The default rolling limits are 10 requests per minute, 300000 input-plus-output tokens per minute, and 1000000000 tokens per seven days. Requests start at least 7000 ms apart, with one request in flight per provider. Input estimates start with a 1.25 safety factor and calibrate upward from actual provider usage. Cached input is counted; reasoning is not added twice. Missing usage retains the reservation.
 
-The default early-compaction threshold is 180000 tokens, independent of a model's larger context window. The bundle configures the official compaction backend to reserve at most 8192 output tokens for summaries. Main requests default to a 16384-token output cap and leave 4096 tokens of extra request headroom. An oversized local request receives at most one additional compaction recovery per step. Single oversized inputs still need splitting; the plugin does not silently truncate history. Waiting another minute cannot reduce the size of one oversized request.
+The plugin budgets the full estimated input, maximum output, and 4096 tokens of headroom. It preserves history when one request fits, waits when only the rolling window is full, and invokes native compaction when one request cannot fit. Web resolves the backend from the Agent's bound preset; headless uses its own context service. Local oversize recovery runs at most once per step. Main requests default to a 16384-token output cap; settlement uses actual provider usage.
 
-The GUI edits every quota field, the compaction threshold, output cap, safety factor, timing margins, and the selected pi-ai provider's idle timeout, SDK timeout, retry count, backoff, and jitter. Suggested connection values are 15-minute idle timeout, 30-minute SDK timeout, and 12 bounded retries. Saving uses normal recovery and preserves configured retry codes. Quotas and connection settings are separate revision-fenced writes; partial acceptance is reported explicitly. Active requests retain captured settings.
+The optional fixed early-compaction threshold lives in Advanced settings and defaults to `-1`, meaning budget-driven compaction only. Disabling plugin compaction leaves DSH's native pressure policy and `/compact` available. A single oversized retained input or fixed prompt can remain uncompactable and needs splitting. Summary requests pass the same shared quota checks. Summary output follows the native backend configuration; a profile-level `compaction-basic` override does not modify an independent backend inside a Web preset.
+
+## Common and advanced settings
+
+The default page shows the three shared quotas, maximum output, automatic compaction, idle wait, and retry count. Each quota accepts `-1` for no limit; `0` is invalid. Maximum output stays positive for pre-dispatch reservation. Disabling one quota leaves other limits, cross-process serialization, and provider 429 cooldown intact.
+
+Advanced settings retain send spacing (7000 ms), fixed compaction threshold (`-1`), request headroom (4096 tokens), input safety factor (1.25), window margin (250 ms), queue polling (500 ms), and minimum 429 cooldown (60000 ms). Send spacing also accepts `-1` for no extra interval. Threshold `-1` disables the fixed threshold while budget compaction remains available. Headroom, safety factor, polling, cooldown, timeouts, and retries do not accept `-1`; retry count `0` disables failure recovery.
+
+Suggested connection values are 900 seconds idle wait, 1800 seconds request wait, and 12 bounded retries. Seconds support 3 decimal places and remain stored as integer milliseconds. Initial/max backoff and jitter remain in Advanced settings. Saving uses normal recovery and preserves retry codes. Quotas and connection settings are separate revision-fenced writes; partial acceptance is reported explicitly. Active requests retain captured settings.
 
 ## State and limitations
 
@@ -41,4 +49,8 @@ npm pack --dry-run
 
 After changing `index.js` or `config.js`, run `npm run build` and commit `dist/index.js` and `THIRD_PARTY_NOTICES.txt`. Package tests copy the release files into a temporary directory without dependencies, then run the same behavior tests against the exported entry.
 
-For the optional local-HTTP integration test, set `DSH_SOURCE_ROOT` to a built DSH checkout and run `npm run test:integration`. It exercises the supported headless launcher, a simulated 429 followed by success, durable attempts/retries, accounting, and the wire output cap. It does not contact a real model provider. With the same `DSH_SOURCE_ROOT`, `npm run test:git-install` creates a disposable Git repository and DSH home, installs through DSH's pnpm, verifies Web activation and native settings writes, then runs the fake-API integration against the installed entry. MIT licensed.
+For local-HTTP integration, set `DSH_SOURCE_ROOT` to a built DSH checkout and run `npm run test:integration`. It exercises headless 429 recovery, durable attempts/retries, accounting, and the wire output cap. `npm run test:web` tests a real Web standard-mode reply and an oversized request that compacts through an isolated native backend before replying. `npm run test:git-install` installs a disposable Git repository through DSH's pnpm, verifies native settings writes, then runs both integrations against the installed entry. These tests contact only local fake services.
+
+## Upgrade from 2.0.x
+
+Run the install command again and restart DSH. Existing quotas, ledgers, and explicit early-compaction thresholds remain. New configurations default to budget-driven compaction; set the advanced fixed threshold to `-1` for that behavior on existing configurations. Web compaction uses the preset service API and no longer requires the Agent's root context to provide the backend. MIT licensed.

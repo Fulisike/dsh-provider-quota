@@ -8,9 +8,10 @@ export const defaults = Object.freeze({
   requestsPerMinute: 10, tokensPerMinute: 300000, tokensPerWeek: 1000000000,
   minIntervalMs: 7000, maxOutputTokens: 16384, tokenSafetyFactor: 1.25,
   windowMarginMs: 250, lockPollMs: 500, throttleCooldownMs: 60000,
-  compactionThresholdTokens: 180000, requestHeadroomTokens: 4096,
+  autoCompact: true, compactionThresholdTokens: -1, requestHeadroomTokens: 4096,
 })
 const positive = value => Number.isSafeInteger(value) && value > 0
+const unlimitedFields = new Set(['requestsPerMinute', 'tokensPerMinute', 'tokensPerWeek', 'minIntervalMs', 'compactionThresholdTokens'])
 export function parseConfig(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('provider-quota: expected config object')
   for (const key of Object.keys(raw)) if (!['stateDirectory', 'providers'].includes(key)) throw new Error(`provider-quota: unknown config field ${key}`)
@@ -24,10 +25,15 @@ export function parseConfig(raw) {
     for (const key of Object.keys(source)) if (!Object.hasOwn(defaults, key)) throw new Error(`provider-quota: unknown field ${provider}.${key}`)
     const policy = { ...defaults, ...source }
     for (const [key, value] of Object.entries(policy)) {
-      if (!(key === 'tokenSafetyFactor' ? Number.isFinite(value) && value >= 1 : positive(value))) throw new Error(`provider-quota: invalid ${provider}.${key}`)
+      const valid = key === 'autoCompact' ? typeof value === 'boolean'
+        : key === 'tokenSafetyFactor' ? Number.isFinite(value) && value >= 1
+        : positive(value) || value === -1 && unlimitedFields.has(key)
+      if (!valid) throw new Error(`provider-quota: invalid ${provider}.${key}`)
     }
-    if (policy.maxOutputTokens + policy.requestHeadroomTokens >= policy.tokensPerMinute || policy.tokensPerMinute > policy.tokensPerWeek
-      || policy.compactionThresholdTokens + policy.maxOutputTokens + policy.requestHeadroomTokens >= policy.tokensPerMinute) {
+    if (policy.tokensPerWeek !== -1 && policy.maxOutputTokens >= policy.tokensPerWeek
+      || policy.tokensPerMinute !== -1 && (policy.maxOutputTokens + policy.requestHeadroomTokens >= policy.tokensPerMinute
+      || policy.tokensPerWeek !== -1 && policy.tokensPerMinute > policy.tokensPerWeek
+      || policy.compactionThresholdTokens !== -1 && policy.compactionThresholdTokens + policy.maxOutputTokens + policy.requestHeadroomTokens >= policy.tokensPerMinute)) {
       throw new Error(`provider-quota: ${provider} requires compaction threshold + output + headroom < TPM <= weekly tokens`)
     }
     providers[provider] = policy
@@ -35,7 +41,8 @@ export function parseConfig(raw) {
   return { stateDirectory, providers }
 }
 const policySchema = z.object(Object.fromEntries(Object.entries(defaults).map(([key, value]) => [key,
-  (key === 'tokenSafetyFactor' ? z.number().min(1) : z.number().step(1).min(1)).default(value),
+  (key === 'autoCompact' ? z.boolean() : key === 'tokenSafetyFactor' ? z.number().min(1)
+    : z.number().step(1).min(unlimitedFields.has(key) ? -1 : 1)).default(value),
 ])))
 export const Config = z.object({
   stateDirectory: z.string(),

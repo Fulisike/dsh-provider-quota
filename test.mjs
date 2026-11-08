@@ -62,7 +62,31 @@ test('native configuration schema exposes live provider fields and validates com
   assert.equal(Config.dict.providers.meta.volatile, true)
   assert.ok(Config['~standard'].validate({ providers: { sjtu: { compactionThresholdTokens: 290000 } } }).issues)
   assert.ok(!Config['~standard'].validate({ providers: { sjtu: {} } }).issues)
-  assert.equal(parseConfig({ providers: { sjtu: {} } }).providers.sjtu.compactionThresholdTokens, 180000)
+  assert.equal(parseConfig({ providers: { sjtu: {} } }).providers.sjtu.compactionThresholdTokens, -1)
+  assert.equal(parseConfig({ providers: { sjtu: {} } }).providers.sjtu.autoCompact, true)
+})
+
+test('minus one disables only the selected quota and keeps the remaining limits', () => {
+  const policy = { ...defaults, requestsPerMinute: -1, tokensPerMinute: -1, tokensPerWeek: -1, minIntervalMs: -1 }
+  assert.ok(!Config['~standard'].validate({ providers: { sjtu: policy } }).issues)
+  const state = { records: [{ sentAt: start, chargedAt: start, tokens: 1_000_000 }], cooldownUntil: 0, lastSentAt: start }
+  assert.deepEqual(admission(state, policy, 2_000_000, start), { kind: 'ready', delayMs: 0 })
+  assert.equal(admission(state, { ...policy, requestsPerMinute: 1 }, 100, start).delayMs, 60250)
+  assert.equal(admission(state, { ...policy, tokensPerMinute: 300000 }, 301000, start).kind, 'oversized')
+  assert.equal(admission(state, { ...policy, tokensPerWeek: 1000001 }, 100, start).kind, 'weekly')
+  assert.equal(admission(empty(), { ...policy, tokensPerWeek: 1000001 }, 2000000, start).kind, 'oversized')
+  assert.equal(admission(state, { ...policy, tokensPerMinute: 300000 }, 100, start).delayMs, 60250)
+  for (const invalid of [{ maxOutputTokens: -1 }, { lockPollMs: -1 }, { requestsPerMinute: 0 }, { tokensPerWeek: -2 }, { autoCompact: 1 }]) {
+    assert.ok(Config['~standard'].validate({ providers: { sjtu: invalid } }).issues)
+  }
+})
+
+test('disabling automatic compaction leaves native compaction and quota errors to their owners', async t => {
+  const f = await fixture(t, { autoCompact: false, compactionThresholdTokens: 180000 })
+  const agent = { ctx: { get() { throw new Error('disabled compaction must not resolve services') } }, session: {} }
+  assert.deepEqual(await f.ctx.waterfall('agent/pre-step', { agent, modelSelection: { provider: 'sjtu' }, signal: new AbortController().signal }, async () => ({ kind: 'enter' })), { kind: 'enter' })
+  const payload = { agent, provider: 'sjtu', turn: 1, step: 1, failure: { code: 'LOCAL_REQUEST_TOO_LARGE' }, signal: new AbortController().signal }
+  assert.equal(await f.ctx.waterfall('agent/request-error', payload, async () => undefined), undefined)
 })
 
 test('usage counts cached tokens and counts reasoning only once', () => {
@@ -248,7 +272,7 @@ test('unloading cancels queued admission and waits for its cleanup', async t => 
 })
 
 test('early compaction uses provider pressure instead of the larger model window', async t => {
-  const f = await fixture(t)
+  const f = await fixture(t, { compactionThresholdTokens: 180000 })
   const calls = []
   f.ctx.set('tokenMeter', { estimateMessage: () => 20, measure: () => ({ totalTokens: 220000 }) })
   const engine = { compactIfNeeded: async (...args) => { calls.push(args[1]); return { summary: [] } } }
@@ -264,7 +288,7 @@ test('early compaction uses provider pressure instead of the larger model window
 test('an oversized request gets at most one compaction recovery per step', async t => {
   const f = await fixture(t)
   let compactions = 0, delegated = 0
-  const agent = { ctx: { get: () => ({ compactIfNeeded: async () => { compactions++; return {} } }) } }
+  const agent = { ctx: { get: key => key === 'compaction' ? { compactIfNeeded: async () => { compactions++; return {} } } : undefined } }
   const payload = { agent, provider: 'sjtu', turn: 1, step: 2, failure: { code: 'LOCAL_REQUEST_TOO_LARGE' }, signal: new AbortController().signal }
   const next = async () => { delegated++; return undefined }
   assert.deepEqual(await f.ctx.waterfall('agent/request-error', payload, next), { kind: 'retry' })
@@ -275,9 +299,29 @@ test('an oversized request gets at most one compaction recovery per step', async
 
 test('unchanged or unavailable compaction does not authorize a retry', async t => {
   const f = await fixture(t)
-  const agent = { ctx: { get: () => ({ compactIfNeeded: async () => null }) } }
+  const agent = { ctx: { get: key => key === 'compaction' ? { compactIfNeeded: async () => null } : undefined } }
   const payload = { agent, provider: 'sjtu', turn: 1, step: 2, failure: { code: 'LOCAL_REQUEST_TOO_LARGE' }, signal: new AbortController().signal }
   assert.equal(await f.ctx.waterfall('agent/request-error', payload, async () => undefined), undefined)
+})
+
+test('isolated preset compaction is resolved through the public preset service', async t => {
+  const f = await fixture(t)
+  let compactions = 0
+  const engine = { compactIfNeeded: async () => { compactions++; return {} } }
+  const agent = { ctx: { get: key => key === 'agentPresets' ? { serviceFor(subject, service) {
+    assert.equal(subject, agent); assert.equal(service, 'compaction'); return engine
+  } } : undefined } }
+  const payload = { agent, provider: 'sjtu', turn: 1, step: 2, failure: { code: 'LOCAL_REQUEST_TOO_LARGE' }, signal: new AbortController().signal }
+  assert.deepEqual(await f.ctx.waterfall('agent/request-error', payload, async () => undefined), { kind: 'retry' })
+  assert.equal(compactions, 1)
+})
+
+test('requests below the early threshold do not require a compaction backend', async t => {
+  const f = await fixture(t, { compactionThresholdTokens: 240000 })
+  f.ctx.set('tokenMeter', { measure: () => ({ totalTokens: 228000 }) })
+  const agent = { ctx: { get: () => undefined }, session: {} }
+  const decision = await f.ctx.waterfall('agent/pre-step', { agent, modelSelection: { provider: 'sjtu' }, signal: new AbortController().signal }, async () => ({ kind: 'enter' }))
+  assert.deepEqual(decision, { kind: 'enter' })
 })
 
 test('live settings replace the policy read by the next request without remounting', async t => {

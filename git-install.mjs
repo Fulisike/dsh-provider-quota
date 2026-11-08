@@ -82,6 +82,10 @@ export function apply(ctx) {
     ...env, DSH_SOURCE_ROOT: dshRoot, DSH_QUOTA_PLUGIN_ENTRY: pathToFileURL(resolve(path, manifest.exports['.'])).href,
   })
   console.log('GIT_INSTALLED_API_OK ' + integration.stdout.trim())
+  const web = await run([join(root, 'web-integration.mjs')], {
+    ...env, DSH_SOURCE_ROOT: dshRoot, DSH_QUOTA_PLUGIN_ENTRY: pathToFileURL(resolve(path, manifest.exports['.'])).href,
+  })
+  console.log('GIT_INSTALLED_WEB_OK ' + web.stdout.trim())
 } finally {
   const rel = relative(resolve(tmpdir()), temporary)
   assert.ok(rel !== '' && rel !== '..' && !rel.startsWith('..\\') && !rel.startsWith('../') && !isAbsolute(rel))

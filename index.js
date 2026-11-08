@@ -22,19 +22,20 @@ export function usageTokens(usage) {
 
 /** Compute the earliest safe send time. Token windows start at settlement, conservatively covering long streams. */
 export function admission(state, policy, cost, now) {
-  if (cost > policy.tokensPerMinute - (policy.requestHeadroomTokens ?? 0)) return { kind: 'oversized' }
+  if (policy.tokensPerMinute !== -1 && cost > policy.tokensPerMinute - (policy.requestHeadroomTokens ?? 0)) return { kind: 'oversized', period: 'minute', limit: policy.tokensPerMinute }
+  if (policy.tokensPerWeek !== -1 && cost > policy.tokensPerWeek) return { kind: 'oversized', period: 'week', limit: policy.tokensPerWeek }
   const week = state.records.filter(row => row.chargedAt + WEEK + policy.windowMarginMs > now)
-  if (week.reduce((sum, row) => sum + row.tokens, 0) + cost > policy.tokensPerWeek) {
+  if (policy.tokensPerWeek !== -1 && week.reduce((sum, row) => sum + row.tokens, 0) + cost > policy.tokensPerWeek) {
     return { kind: 'weekly', retryAt: Math.min(...week.map(row => row.chargedAt + WEEK + policy.windowMarginMs)) }
   }
-  let at = Math.max(now, state.cooldownUntil, state.lastSentAt + policy.minIntervalMs)
+  let at = Math.max(now, state.cooldownUntil, state.lastSentAt + (policy.minIntervalMs === -1 ? 0 : policy.minIntervalMs))
   const requests = state.records.filter(row => row.sentAt + MINUTE + policy.windowMarginMs > now)
-  while (requests.filter(row => row.sentAt + MINUTE + policy.windowMarginMs > at).length >= policy.requestsPerMinute) {
+  while (policy.requestsPerMinute !== -1 && requests.filter(row => row.sentAt + MINUTE + policy.windowMarginMs > at).length >= policy.requestsPerMinute) {
     at = Math.min(...requests.filter(row => row.sentAt + MINUTE + policy.windowMarginMs > at)
       .map(row => row.sentAt + MINUTE + policy.windowMarginMs))
   }
   const tokens = state.records.filter(row => row.chargedAt + MINUTE + policy.windowMarginMs > now)
-  while (tokens.filter(row => row.chargedAt + MINUTE + policy.windowMarginMs > at)
+  while (policy.tokensPerMinute !== -1 && tokens.filter(row => row.chargedAt + MINUTE + policy.windowMarginMs > at)
     .reduce((sum, row) => sum + row.tokens, 0) + cost > policy.tokensPerMinute) {
     at = Math.min(...tokens.filter(row => row.chargedAt + MINUTE + policy.windowMarginMs > at)
       .map(row => row.chargedAt + MINUTE + policy.windowMarginMs))
@@ -151,7 +152,8 @@ export async function apply(ctx, raw, internals = {}) {
         const now = clock()
         const decision = admission(state, policy, cost, now)
         if (decision.kind === 'oversized') {
-          yield finish('LOCAL_REQUEST_TOO_LARGE', `提供方 ${options.provider}：预计输入与输出预留共 ${cost} token，加上 ${policy.requestHeadroomTokens} token 安全余量后超过每分钟 ${policy.tokensPerMinute}；请压缩上下文或降低最大输出。`)
+          const budget = decision.period === 'minute' ? `每分钟 ${decision.limit}（含 ${policy.requestHeadroomTokens} token 额外余量）` : `滚动 7 天 ${decision.limit}`
+          yield finish('LOCAL_REQUEST_TOO_LARGE', `提供方 ${options.provider}：预计输入与输出预留共 ${cost} token，超过${budget}预算；请压缩上下文或降低最大输出。`)
           return
         }
         if (decision.kind === 'weekly') {
@@ -205,14 +207,16 @@ export async function apply(ctx, raw, internals = {}) {
     }
   }
 
+  // Web presets isolate compaction below the Agent's scope; the registry resolves its retained revision.
+  const compactionFor = agent => agent.ctx.get('agentPresets')?.serviceFor(agent, 'compaction') ?? agent.ctx.get('compaction')
   const offPreStep = ctx.on('agent/pre-step', ({ agent, modelSelection, signal }, next) => track((async () => {
     lifetime.signal.throwIfAborted()
     const policy = readConfig().providers[modelSelection.provider]
-    if (policy) {
-      const engine = agent.ctx.get('compaction')
-      if (!engine) throw new Error('provider-quota: the configured provider requires a compaction service')
+    if (policy?.autoCompact && policy.compactionThresholdTokens !== -1) {
       const pressure = ctx.tokenMeter.measure(agent.session).totalTokens
       if (pressure >= policy.compactionThresholdTokens) {
+        const engine = compactionFor(agent)
+        if (!engine) throw new Error('provider-quota: automatic compaction is unavailable; enable the preset compaction backend or disable automatic compaction')
         signal.throwIfAborted()
         const result = await engine.compactIfNeeded(agent, 'context-overflow', AbortSignal.any([signal, lifetime.signal]))
         if (result === null) ctx.logger.warn('provider-quota: no balanced history range can be compacted for %s', modelSelection.provider)
@@ -222,12 +226,15 @@ export async function apply(ctx, raw, internals = {}) {
   })()), { global: true })
   const offRecovery = ctx.on('agent/request-error', (payload, next) => track((async () => {
     const { agent, failure, provider, turn, step, signal } = payload
-    if (failure.code !== 'LOCAL_REQUEST_TOO_LARGE' || !readConfig().providers[provider]) return next()
+    if (failure.code !== 'LOCAL_REQUEST_TOO_LARGE' || !readConfig().providers[provider]?.autoCompact) return next()
     const key = `${turn}/${step}`
     if (recovered.get(agent) === key) return next()
     recovered.set(agent, key)
-    const engine = agent.ctx.get('compaction')
-    if (!engine) return next()
+    const engine = compactionFor(agent)
+    if (!engine) {
+      ctx.logger.warn('provider-quota: automatic compaction is unavailable in this agent preset; the oversized request remains blocked')
+      return next()
+    }
     const fused = AbortSignal.any([signal, lifetime.signal])
     fused.throwIfAborted()
     const result = await engine.compactIfNeeded(agent, 'context-overflow', fused)
