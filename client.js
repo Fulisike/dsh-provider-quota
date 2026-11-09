@@ -10,6 +10,7 @@ window.__ModuleLoader__.load({ id: 'dsh-provider-quota', factory(require) {
     requestsPerMinute: '每分钟请求上限', tokensPerMinute: '每分钟 token 上限（输入＋输出）', tokensPerWeek: '滚动 7 天 token 上限',
     minIntervalMs: '最短发送间隔（毫秒）', maxOutputTokens: '单次最大输出 token', tokenSafetyFactor: '输入估计安全系数',
     compactionThresholdTokens: '固定提前压缩阈值（token）', requestHeadroomTokens: '单次请求额外余量（token）',
+    maxCompactionPasses: '一次恢复最多连续压缩几段',
     windowMarginMs: '窗口边缘余量（毫秒）', lockPollMs: '队列检查间隔（毫秒）', throttleCooldownMs: '429 最短冷却（毫秒）',
     streamIdleTimeoutMs: '连续多久没有输出才重试（秒）', timeoutMs: '单次请求最长等待（秒）', maxRetries: '失败后最多重试次数',
     initialDelayMs: '首次重试前等待（秒）', maxDelayMs: '重试等待最长间隔（秒）', jitterRatio: '退避抖动比例（0–1）',
@@ -32,6 +33,7 @@ window.__ModuleLoader__.load({ id: 'dsh-provider-quota', factory(require) {
     requestsPerMinute: 'Requests per minute', tokensPerMinute: 'Tokens per minute (input + output)', tokensPerWeek: 'Tokens per rolling 7 days',
     minIntervalMs: 'Minimum send interval (ms)', maxOutputTokens: 'Maximum output tokens', tokenSafetyFactor: 'Input estimate safety factor',
     compactionThresholdTokens: 'Fixed early compaction threshold (tokens)', requestHeadroomTokens: 'Extra request headroom (tokens)',
+    maxCompactionPasses: 'Maximum compaction passes per recovery',
     windowMarginMs: 'Window margin (ms)', lockPollMs: 'Queue check interval (ms)', throttleCooldownMs: 'Minimum 429 cooldown (ms)',
     streamIdleTimeoutMs: 'Retry after no output for (seconds)', timeoutMs: 'Maximum request wait (seconds)', maxRetries: 'Maximum retries after failure',
     initialDelayMs: 'Initial retry wait (seconds)', maxDelayMs: 'Maximum retry wait (seconds)', jitterRatio: 'Backoff jitter ratio (0–1)',
@@ -61,7 +63,7 @@ window.__ModuleLoader__.load({ id: 'dsh-provider-quota', factory(require) {
 .dsh-pq summary{cursor:pointer;font-weight:500;padding:2px 0}.dsh-pq details[open] summary{margin-bottom:16px}.dsh-pq .pq-help{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}.dsh-pq .pq-advanced{display:flex;flex-direction:column;gap:16px}
 @media(max-width:720px){.dsh-pq .pq-grid{grid-template-columns:1fr}.dsh-pq{gap:20px}}`
   const quotaFields = ['requestsPerMinute', 'tokensPerMinute', 'tokensPerWeek', 'minIntervalMs', 'maxOutputTokens',
-    'compactionThresholdTokens', 'requestHeadroomTokens', 'tokenSafetyFactor', 'windowMarginMs', 'lockPollMs', 'throttleCooldownMs']
+    'compactionThresholdTokens', 'requestHeadroomTokens', 'tokenSafetyFactor', 'windowMarginMs', 'lockPollMs', 'throttleCooldownMs', 'maxCompactionPasses']
   const retryFields = ['streamIdleTimeoutMs', 'timeoutMs', 'maxRetries', 'initialDelayMs', 'maxDelayMs', 'jitterRatio']
   const basicQuotaFields = ['requestsPerMinute', 'tokensPerMinute', 'tokensPerWeek', 'maxOutputTokens']
   const unlimitedFields = new Set(['requestsPerMinute', 'tokensPerMinute', 'tokensPerWeek', 'minIntervalMs', 'compactionThresholdTokens'])

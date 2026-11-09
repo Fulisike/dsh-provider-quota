@@ -1621,6 +1621,40 @@ import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { isAbsolute as isAbsolute2, join as join2 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
+// compaction.js
+var oversized = (error) => error?.code === "LOCAL_REQUEST_TOO_LARGE";
+async function compactOnce(engine, agent, signal, meter, loadPairing, canResume = async () => false) {
+  try {
+    return await engine.compactIfNeeded(agent, "context-overflow", signal) !== null;
+  } catch (error) {
+    signal.throwIfAborted();
+    if (!oversized(error)) throw error;
+    if (await canResume()) return true;
+  }
+  const { toolPairingBalancedBefore: before, toolPairingBalancedAfter: after } = await loadPairing();
+  signal.throwIfAborted();
+  const session = agent.session;
+  const nodes = meter.measure(session).nodes;
+  if (nodes.length !== session.surface.nodes.length || nodes.some((node, index) => node.seq !== session.surface.nodes[index])) {
+    throw new Error("provider-quota: token prices do not match the current session surface");
+  }
+  let start = session.deriveMessages()[0]?.role === "system" || nodes[0]?.tokens === 0 ? 1 : 0;
+  while (start < nodes.length - 1 && !before(session, nodes[start].seq)) start++;
+  const ends = [];
+  for (let index = start; index < nodes.length - 1; index++) if (after(session, nodes[index].seq)) ends.push(index);
+  for (let cut = Math.floor(ends.length / 2) - 1; cut >= 0; cut = Math.floor((cut + 1) / 2) - 1) {
+    signal.throwIfAborted();
+    try {
+      await engine.compactRegion(nodes[start].seq, nodes[ends[cut]].seq, agent, signal);
+      return true;
+    } catch (error) {
+      signal.throwIfAborted();
+      if (!oversized(error)) throw error;
+    }
+  }
+  throw Object.assign(new Error("\u65E0\u6CD5\u5728\u5171\u4EAB\u989D\u5EA6\u5185\u751F\u6210\u6458\u8981\uFF1A\u6700\u5C0F\u7684\u5B8C\u6574\u5386\u53F2\u6BB5\u6216\u56FA\u5B9A\u63D0\u793A\u4ECD\u7136\u8FC7\u5927\u3002\u8BF7\u964D\u4F4E\u5F53\u524D\u9884\u8BBE\u538B\u7F29\u540E\u7AEF\u7684\u6458\u8981\u8F93\u51FA\u4E0A\u9650\uFF0C\u6216\u62C6\u5206\u5927\u6BB5\u8F93\u5165\u3002"), { code: "LOCAL_COMPACTION_UNSPLITTABLE" });
+}
+
 // node_modules/.pnpm/@deepseek-ai+cosmokit@1.9.0/node_modules/@deepseek-ai/cosmokit/lib/index.js
 function isNullable(value) {
   return value === null || value === void 0;
@@ -2503,7 +2537,8 @@ var defaults = Object.freeze({
   throttleCooldownMs: 6e4,
   autoCompact: true,
   compactionThresholdTokens: -1,
-  requestHeadroomTokens: 4096
+  requestHeadroomTokens: 4096,
+  maxCompactionPasses: 4
 });
 var positive = (value) => Number.isSafeInteger(value) && value > 0;
 var unlimitedFields = /* @__PURE__ */ new Set(["requestsPerMinute", "tokensPerMinute", "tokensPerWeek", "minIntervalMs", "compactionThresholdTokens"]);
@@ -2621,6 +2656,7 @@ async function apply(ctx, raw, internals = {}) {
   const lifetime = new AbortController();
   const active = /* @__PURE__ */ new Set();
   const recovered = /* @__PURE__ */ new WeakMap();
+  const rejectedRequests = /* @__PURE__ */ new WeakMap();
   const track = (operation) => {
     const pending = operation.finally(() => active.delete(pending));
     active.add(pending);
@@ -2677,8 +2713,11 @@ async function apply(ctx, raw, internals = {}) {
         const now2 = clock();
         const decision = admission(state, policy, cost, now2);
         if (decision.kind === "oversized") {
+          const agent = options.sessionId === void 0 ? void 0 : ctx.get("agents")?.get(options.sessionId);
+          if (agent && options.purpose !== "compaction") rejectedRequests.set(agent, { framing, maxTokens: options.maxTokens ?? policy.maxOutputTokens });
           const budget = decision.period === "minute" ? `\u6BCF\u5206\u949F ${decision.limit}\uFF08\u542B ${policy.requestHeadroomTokens} token \u989D\u5916\u4F59\u91CF\uFF09` : `\u6EDA\u52A8 7 \u5929 ${decision.limit}`;
-          yield finish("LOCAL_REQUEST_TOO_LARGE", `\u63D0\u4F9B\u65B9 ${options.provider}\uFF1A\u9884\u8BA1\u8F93\u5165\u4E0E\u8F93\u51FA\u9884\u7559\u5171 ${cost} token\uFF0C\u8D85\u8FC7${budget}\u9884\u7B97\uFF1B\u8BF7\u538B\u7F29\u4E0A\u4E0B\u6587\u6216\u964D\u4F4E\u6700\u5927\u8F93\u51FA\u3002`);
+          const action = options.purpose === "compaction" ? "\u6458\u8981\u8BF7\u6C42\u672C\u8EAB\u8D85\u9650\uFF0C\u9700\u8981\u5206\u6BB5\u538B\u7F29\u5386\u53F2\u6216\u964D\u4F4E\u539F\u751F\u6458\u8981\u8F93\u51FA\u4E0A\u9650\u3002" : "\u8BF7\u538B\u7F29\u4E0A\u4E0B\u6587\u6216\u964D\u4F4E\u6700\u5927\u8F93\u51FA\u3002";
+          yield finish("LOCAL_REQUEST_TOO_LARGE", `\u63D0\u4F9B\u65B9 ${options.provider}\uFF1A\u9884\u8BA1\u8F93\u5165\u4E0E\u8F93\u51FA\u9884\u7559\u5171 ${cost} token\uFF0C\u8D85\u8FC7${budget}\u9884\u7B97\uFF1B${action}`);
           return;
         }
         if (decision.kind === "weekly") {
@@ -2737,6 +2776,14 @@ async function apply(ctx, raw, internals = {}) {
     }
   }
   const compactionFor = (agent) => agent.ctx.get("agentPresets")?.serviceFor(agent, "compaction") ?? agent.ctx.get("compaction");
+  let pairing;
+  const loadPairing = () => pairing ??= ctx.get("loader").import("@deepseek-ai/dsh-compaction");
+  let llmErrors;
+  const reportCompactionFailure = async (error) => {
+    if (typeof error?.code !== "string" || !error.code.startsWith("LOCAL_COMPACTION_")) throw error;
+    const { LlmError } = await (llmErrors ??= ctx.get("loader").import("@deepseek-ai/dsh-llm"));
+    throw new LlmError(error.message, error.code);
+  };
   const offPreStep = ctx.on("agent/pre-step", ({ agent, modelSelection, signal }, next) => track((async () => {
     lifetime.signal.throwIfAborted();
     const policy = readConfig().providers[modelSelection.provider];
@@ -2746,15 +2793,16 @@ async function apply(ctx, raw, internals = {}) {
         const engine = compactionFor(agent);
         if (!engine) throw new Error("provider-quota: automatic compaction is unavailable; enable the preset compaction backend or disable automatic compaction");
         signal.throwIfAborted();
-        const result = await engine.compactIfNeeded(agent, "context-overflow", AbortSignal.any([signal, lifetime.signal]));
-        if (result === null) ctx.logger.warn("provider-quota: no balanced history range can be compacted for %s", modelSelection.provider);
+        const changed = await compactOnce(engine, agent, AbortSignal.any([signal, lifetime.signal]), ctx.tokenMeter, loadPairing);
+        if (!changed) ctx.logger.warn("provider-quota: no balanced history range can be compacted for %s", modelSelection.provider);
       }
     }
     return next();
-  })()), { global: true });
+  })().catch(reportCompactionFailure)), { global: true });
   const offRecovery = ctx.on("agent/request-error", (payload, next) => track((async () => {
     const { agent, failure, provider, turn, step, signal } = payload;
-    if (failure.code !== "LOCAL_REQUEST_TOO_LARGE" || !readConfig().providers[provider]?.autoCompact) return next();
+    const policy = readConfig().providers[provider];
+    if (failure.code !== "LOCAL_REQUEST_TOO_LARGE" || !policy?.autoCompact) return next();
     const key = `${turn}/${step}`;
     if (recovered.get(agent) === key) return next();
     recovered.set(agent, key);
@@ -2765,10 +2813,30 @@ async function apply(ctx, raw, internals = {}) {
     }
     const fused = AbortSignal.any([signal, lifetime.signal]);
     fused.throwIfAborted();
-    const result = await engine.compactIfNeeded(agent, "context-overflow", fused);
-    fused.throwIfAborted();
-    return result === null ? next() : { kind: "retry" };
-  })()), { global: true });
+    const budget = rejectedRequests.get(agent);
+    if (!budget) return await compactOnce(engine, agent, fused, ctx.tokenMeter, loadPairing) ? { kind: "retry" } : next();
+    const price = async () => {
+      fused.throwIfAborted();
+      const raw2 = agent.session.deriveMessages().reduce((sum, message) => sum + ctx.tokenMeter.estimateMessage(message), 0);
+      const file = join2(config.stateDirectory, `${createHash("sha256").update(provider).digest("hex")}.json`);
+      const state = await load(file, provider, clock(), false);
+      return { raw: raw2, cost: Math.ceil((raw2 + budget.framing) * Math.max(policy.tokenSafetyFactor, state.inputScale)) + budget.maxTokens };
+    };
+    const fits = (cost) => admission({ records: [], cooldownUntil: 0, lastSentAt: 0 }, policy, cost, clock()).kind !== "oversized";
+    for (let pass = 0; pass < policy.maxCompactionPasses; pass++) {
+      const before = await price();
+      const changed = await compactOnce(engine, agent, fused, ctx.tokenMeter, loadPairing, async () => {
+        const current = await price();
+        return current.raw < before.raw && fits(current.cost);
+      });
+      fused.throwIfAborted();
+      if (!changed) return next();
+      const after = await price();
+      if (after.raw >= before.raw) throw Object.assign(new Error("\u81EA\u52A8\u538B\u7F29\u6CA1\u6709\u964D\u4F4E\u5F53\u524D\u8BF7\u6C42\u7684\u8F93\u5165\u9884\u7B97\uFF1B\u5DF2\u505C\u6B62\u6062\u590D\uFF0C\u8BF7\u68C0\u67E5\u56FA\u5B9A\u63D0\u793A\u6216\u5355\u6761\u5927\u6BB5\u8F93\u5165\u3002"), { code: "LOCAL_COMPACTION_STALLED" });
+      if (fits(after.cost)) return { kind: "retry" };
+    }
+    throw Object.assign(new Error(`\u5DF2\u5B8C\u6210 ${policy.maxCompactionPasses} \u6BB5\u538B\u7F29\uFF0C\u8BF7\u6C42\u4ECD\u8D85\u51FA\u5171\u4EAB\u989D\u5EA6\uFF1B\u53EF\u63D0\u9AD8\u9AD8\u7EA7\u8BBE\u7F6E\u4E2D\u7684\u6700\u5927\u8FDE\u7EED\u538B\u7F29\u6B21\u6570\uFF0C\u6216\u62C6\u5206\u5927\u6BB5\u8F93\u5165\u3002`), { code: "LOCAL_COMPACTION_LIMIT" });
+  })().catch(reportCompactionFailure)), { global: true });
   const offRequest = ctx.on("agent/request", async (_payload, next) => {
     lifetime.signal.throwIfAborted();
     const call = await next();

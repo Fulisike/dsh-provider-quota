@@ -8,7 +8,7 @@ export const defaults = Object.freeze({
   requestsPerMinute: 10, tokensPerMinute: 300000, tokensPerWeek: 1000000000,
   minIntervalMs: 7000, maxOutputTokens: 16384, tokenSafetyFactor: 1.25,
   windowMarginMs: 250, lockPollMs: 500, throttleCooldownMs: 60000,
-  autoCompact: true, compactionThresholdTokens: -1, requestHeadroomTokens: 4096,
+  autoCompact: true, compactionThresholdTokens: -1, requestHeadroomTokens: 4096, maxCompactionPasses: 4,
 })
 const positive = value => Number.isSafeInteger(value) && value > 0
 const unlimitedFields = new Set(['requestsPerMinute', 'tokensPerMinute', 'tokensPerWeek', 'minIntervalMs', 'compactionThresholdTokens'])

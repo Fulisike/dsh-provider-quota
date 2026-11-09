@@ -19,6 +19,9 @@ const limited = { type: 'finish', reason: { kind: 'error', failure: {
 const usage = { inputTokens: 20, outputTokens: 10, cacheReadTokens: 3, reasoningTokens: 8 }
 const chunks = async function* (...items) { yield* items }
 const collect = async source => { const result = []; for await (const item of source) result.push(item); return result }
+class FixtureLlmError extends Error {
+  constructor(message, code) { super(message); this.code = code }
+}
 
 async function fixture(t, overrides = {}, options = {}) {
   const directory = options.directory ?? await mkdtemp(join(tmpdir(), 'dsh-provider-quota-test-'))
@@ -322,6 +325,84 @@ test('requests below the early threshold do not require a compaction backend', a
   const agent = { ctx: { get: () => undefined }, session: {} }
   const decision = await f.ctx.waterfall('agent/pre-step', { agent, modelSelection: { provider: 'sjtu' }, signal: new AbortController().signal }, async () => ({ kind: 'enter' }))
   assert.deepEqual(decision, { kind: 'enter' })
+})
+
+test('oversized summaries halve native balanced prefixes and preserve positional sequence order', async t => {
+  const f = await fixture(t)
+  const seqs = [40, 80, 81, 20, 21, 60, 61, 10, 11, 70, 71, 30, 31, 50, 51, 90, 91, 100]
+  const safeEnds = new Set([81, 21, 61, 11, 71, 31, 51, 91])
+  const calls = []
+  f.ctx.provide('loader', { import: async name => {
+    assert.equal(name, '@deepseek-ai/dsh-compaction')
+    return { toolPairingBalancedBefore: (_session, seq) => seq === 80,
+      toolPairingBalancedAfter: (_session, seq) => safeEnds.has(seq) }
+  } })
+  f.ctx.set('tokenMeter', { measure: () => ({ nodes: seqs.map(seq => ({ seq, tokens: 100 })) }) })
+  const engine = {
+    async compactIfNeeded() { throw Object.assign(new Error('summary too large'), { code: 'LOCAL_REQUEST_TOO_LARGE' }) },
+    async compactRegion(start, end) {
+      calls.push([start, end])
+      if (calls.length === 1) throw Object.assign(new Error('still too large'), { code: 'LOCAL_REQUEST_TOO_LARGE' })
+      return {}
+    },
+  }
+  const agent = { ctx: { get: key => key === 'compaction' ? engine : undefined },
+    session: { surface: { nodes: seqs }, deriveMessages: () => [{ role: 'system' }] } }
+  const payload = { agent, provider: 'sjtu', turn: 1, step: 1, failure: { code: 'LOCAL_REQUEST_TOO_LARGE' }, signal: new AbortController().signal }
+  assert.deepEqual(await f.ctx.waterfall('agent/request-error', payload, async () => undefined), { kind: 'retry' })
+  assert.deepEqual(calls, [[80, 11], [80, 21]])
+})
+
+test('summary transport failures propagate without a smaller-range retry', async t => {
+  const f = await fixture(t)
+  const failure = Object.assign(new Error('unknown network outcome'), { code: 'TRANSPORT' })
+  const agent = { ctx: { get: key => key === 'compaction' ? { compactIfNeeded: async () => { throw failure } } : undefined } }
+  const payload = { agent, provider: 'sjtu', turn: 1, step: 1, failure: { code: 'LOCAL_REQUEST_TOO_LARGE' }, signal: new AbortController().signal }
+  await assert.rejects(f.ctx.waterfall('agent/request-error', payload, async () => undefined), error => error === failure)
+})
+
+test('a single unsplittable tool group stops without retrying the same oversized summary', async t => {
+  const f = await fixture(t)
+  const seqs = [0, 1, 2, 3]
+  f.ctx.provide('loader', { import: async () => ({ LlmError: FixtureLlmError, toolPairingBalancedBefore: () => true,
+    toolPairingBalancedAfter: (_session, seq) => seq === 2 }) })
+  f.ctx.set('tokenMeter', { measure: () => ({ nodes: seqs.map(seq => ({ seq, tokens: 100 })) }) })
+  const engine = { compactIfNeeded: async () => { throw Object.assign(new Error('too large'), { code: 'LOCAL_REQUEST_TOO_LARGE' }) },
+    compactRegion() { throw new Error('must not repeat the failed whole tool group') } }
+  const agent = { ctx: { get: key => key === 'compaction' ? engine : undefined },
+    session: { surface: { nodes: seqs }, deriveMessages: () => [{ role: 'system' }] } }
+  const payload = { agent, provider: 'sjtu', turn: 1, step: 1, failure: { code: 'LOCAL_REQUEST_TOO_LARGE' }, signal: new AbortController().signal }
+  await assert.rejects(f.ctx.waterfall('agent/request-error', payload, async () => undefined), { code: 'LOCAL_COMPACTION_UNSPLITTABLE' })
+})
+
+async function stagedRecovery(t, maxCompactionPasses, decrement) {
+  const f = await fixture(t, { tokensPerMinute: 1000, requestHeadroomTokens: 100, maxCompactionPasses })
+  let length = 880, passes = 0
+  const messages = () => [{ role: 'user', content: [{ type: 'text', text: 'x'.repeat(length) }] }]
+  f.ctx.set('tokenMeter', { estimateMessage: message => message.content[0].text.length })
+  const engine = { compactIfNeeded: async () => { passes++; length -= decrement; return {} } }
+  const agent = { session: { deriveMessages: messages }, ctx: { get: key => key === 'compaction' ? engine : undefined } }
+  f.ctx.provide('agents', { get: () => agent })
+  f.ctx.provide('loader', { import: async () => ({ LlmError: FixtureLlmError }) })
+  const rejected = await collect(f.request(() => { throw new Error('oversized request must not send') }, { sessionId: 'test-session', messages: messages() }))
+  assert.equal(rejected.at(-1).reason.failure.code, 'LOCAL_REQUEST_TOO_LARGE')
+  const payload = { agent, provider: 'sjtu', turn: 1, step: 1, failure: { code: 'LOCAL_REQUEST_TOO_LARGE' }, signal: new AbortController().signal }
+  return { run: () => f.ctx.waterfall('agent/request-error', payload, async () => undefined), passes: () => passes }
+}
+
+test('multiple shrinking compactions finish before the original request is retried', async t => {
+  const f = await stagedRecovery(t, 4, 100)
+  assert.deepEqual(await f.run(), { kind: 'retry' })
+  assert.equal(f.passes(), 3)
+})
+
+test('continuous compaction has a configured pass limit and requires measurable progress', async t => {
+  const limited = await stagedRecovery(t, 2, 100)
+  await assert.rejects(limited.run(), { code: 'LOCAL_COMPACTION_LIMIT' })
+  assert.equal(limited.passes(), 2)
+  const stalled = await stagedRecovery(t, 4, 0)
+  await assert.rejects(stalled.run(), { code: 'LOCAL_COMPACTION_STALLED' })
+  assert.equal(stalled.passes(), 1)
 })
 
 test('live settings replace the policy read by the next request without remounting', async t => {

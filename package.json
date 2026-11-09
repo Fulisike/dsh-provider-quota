@@ -1,6 +1,6 @@
 {
   "name": "dsh-provider-quota",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Provider-wide rolling quotas, early context compaction, and live GUI settings for DeepSeek Harness.",
   "type": "module",
   "license": "MIT",

@@ -4,6 +4,7 @@ import { mkdir, open, readFile, rename, rm } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import lockfile from 'proper-lockfile'
+import { compactOnce } from './compaction.js'
 
 const MINUTE = 60_000
 const WEEK = 7 * 24 * 60 * MINUTE
@@ -97,6 +98,7 @@ export async function apply(ctx, raw, internals = {}) {
   const lifetime = new AbortController()
   const active = new Set()
   const recovered = new WeakMap()
+  const rejectedRequests = new WeakMap()
   const track = operation => {
     const pending = operation.finally(() => active.delete(pending))
     active.add(pending)
@@ -152,8 +154,11 @@ export async function apply(ctx, raw, internals = {}) {
         const now = clock()
         const decision = admission(state, policy, cost, now)
         if (decision.kind === 'oversized') {
+          const agent = options.sessionId === undefined ? undefined : ctx.get('agents')?.get(options.sessionId)
+          if (agent && options.purpose !== 'compaction') rejectedRequests.set(agent, { framing, maxTokens: options.maxTokens ?? policy.maxOutputTokens })
           const budget = decision.period === 'minute' ? `每分钟 ${decision.limit}（含 ${policy.requestHeadroomTokens} token 额外余量）` : `滚动 7 天 ${decision.limit}`
-          yield finish('LOCAL_REQUEST_TOO_LARGE', `提供方 ${options.provider}：预计输入与输出预留共 ${cost} token，超过${budget}预算；请压缩上下文或降低最大输出。`)
+          const action = options.purpose === 'compaction' ? '摘要请求本身超限，需要分段压缩历史或降低原生摘要输出上限。' : '请压缩上下文或降低最大输出。'
+          yield finish('LOCAL_REQUEST_TOO_LARGE', `提供方 ${options.provider}：预计输入与输出预留共 ${cost} token，超过${budget}预算；${action}`)
           return
         }
         if (decision.kind === 'weekly') {
@@ -209,6 +214,14 @@ export async function apply(ctx, raw, internals = {}) {
 
   // Web presets isolate compaction below the Agent's scope; the registry resolves its retained revision.
   const compactionFor = agent => agent.ctx.get('agentPresets')?.serviceFor(agent, 'compaction') ?? agent.ctx.get('compaction')
+  let pairing
+  const loadPairing = () => pairing ??= ctx.get('loader').import('@deepseek-ai/dsh-compaction')
+  let llmErrors
+  const reportCompactionFailure = async error => {
+    if (typeof error?.code !== 'string' || !error.code.startsWith('LOCAL_COMPACTION_')) throw error
+    const { LlmError } = await (llmErrors ??= ctx.get('loader').import('@deepseek-ai/dsh-llm'))
+    throw new LlmError(error.message, error.code)
+  }
   const offPreStep = ctx.on('agent/pre-step', ({ agent, modelSelection, signal }, next) => track((async () => {
     lifetime.signal.throwIfAborted()
     const policy = readConfig().providers[modelSelection.provider]
@@ -218,15 +231,16 @@ export async function apply(ctx, raw, internals = {}) {
         const engine = compactionFor(agent)
         if (!engine) throw new Error('provider-quota: automatic compaction is unavailable; enable the preset compaction backend or disable automatic compaction')
         signal.throwIfAborted()
-        const result = await engine.compactIfNeeded(agent, 'context-overflow', AbortSignal.any([signal, lifetime.signal]))
-        if (result === null) ctx.logger.warn('provider-quota: no balanced history range can be compacted for %s', modelSelection.provider)
+        const changed = await compactOnce(engine, agent, AbortSignal.any([signal, lifetime.signal]), ctx.tokenMeter, loadPairing)
+        if (!changed) ctx.logger.warn('provider-quota: no balanced history range can be compacted for %s', modelSelection.provider)
       }
     }
     return next()
-  })()), { global: true })
+  })().catch(reportCompactionFailure)), { global: true })
   const offRecovery = ctx.on('agent/request-error', (payload, next) => track((async () => {
     const { agent, failure, provider, turn, step, signal } = payload
-    if (failure.code !== 'LOCAL_REQUEST_TOO_LARGE' || !readConfig().providers[provider]?.autoCompact) return next()
+    const policy = readConfig().providers[provider]
+    if (failure.code !== 'LOCAL_REQUEST_TOO_LARGE' || !policy?.autoCompact) return next()
     const key = `${turn}/${step}`
     if (recovered.get(agent) === key) return next()
     recovered.set(agent, key)
@@ -237,10 +251,30 @@ export async function apply(ctx, raw, internals = {}) {
     }
     const fused = AbortSignal.any([signal, lifetime.signal])
     fused.throwIfAborted()
-    const result = await engine.compactIfNeeded(agent, 'context-overflow', fused)
-    fused.throwIfAborted()
-    return result === null ? next() : { kind: 'retry' }
-  })()), { global: true })
+    const budget = rejectedRequests.get(agent)
+    if (!budget) return await compactOnce(engine, agent, fused, ctx.tokenMeter, loadPairing) ? { kind: 'retry' } : next()
+    const price = async () => {
+      fused.throwIfAborted()
+      const raw = agent.session.deriveMessages().reduce((sum, message) => sum + ctx.tokenMeter.estimateMessage(message), 0)
+      const file = join(config.stateDirectory, `${createHash('sha256').update(provider).digest('hex')}.json`)
+      const state = await load(file, provider, clock(), false)
+      return { raw, cost: Math.ceil((raw + budget.framing) * Math.max(policy.tokenSafetyFactor, state.inputScale)) + budget.maxTokens }
+    }
+    const fits = cost => admission({ records: [], cooldownUntil: 0, lastSentAt: 0 }, policy, cost, clock()).kind !== 'oversized'
+    for (let pass = 0; pass < policy.maxCompactionPasses; pass++) {
+      const before = await price()
+      const changed = await compactOnce(engine, agent, fused, ctx.tokenMeter, loadPairing, async () => {
+        const current = await price()
+        return current.raw < before.raw && fits(current.cost)
+      })
+      fused.throwIfAborted()
+      if (!changed) return next()
+      const after = await price()
+      if (after.raw >= before.raw) throw Object.assign(new Error('自动压缩没有降低当前请求的输入预算；已停止恢复，请检查固定提示或单条大段输入。'), { code: 'LOCAL_COMPACTION_STALLED' })
+      if (fits(after.cost)) return { kind: 'retry' }
+    }
+    throw Object.assign(new Error(`已完成 ${policy.maxCompactionPasses} 段压缩，请求仍超出共享额度；可提高高级设置中的最大连续压缩次数，或拆分大段输入。`), { code: 'LOCAL_COMPACTION_LIMIT' })
+  })().catch(reportCompactionFailure)), { global: true })
   const offRequest = ctx.on('agent/request', async (_payload, next) => {
     lifetime.signal.throwIfAborted()
     const call = await next()
